@@ -119,7 +119,7 @@ function updateBull(B, dt) {
     } else if ((B.state === 'charge' || bullIn > 180) && player.inv <= 0 && !(B.demo && dt <= 0) && !(B.demo && B.state !== 'charge' && (B.rubCD || 0) > time)) {   // a demo Bull held by a card hurts no one; its hunting bumps cost fuel at most every BULL_DEMO.rubCD
       const cost = B.demo ? (B.state === 'charge' ? BULL_DEMO.charge : BULL_DEMO.rub) : B.state === 'charge' ? 12 + 2 * stageIx : 5, n = B.demo ? eqShieldTake(cost, B.x, B.y) : cost;   // a rear shield takes some of it from behind
       if (B.demo && B.state !== 'charge') B.rubCD = time + BULL_DEMO.rubCD;
-      if (n > 0) hurt(n, false, 'boss'); player.vx += h.nx * 520; player.vy += h.ny * 520; player.a += rand(-0.8, 0.8);   // its charge costs 12 fuel on stage 1 (more later) and throws you; a rub costs 5
+      if (n > 0) hurt(n, false, 'boss', B); player.vx += h.nx * 520; player.vy += h.ny * 520; player.a += rand(-0.8, 0.8);   // its charge costs 12 fuel on stage 1 (more later) and throws you; a rub costs 5
       if (up.wheels) damageBoss(40 * up.wheels, 'crush', p.x, p.y);
       if (B.state === 'charge') { B.state = 'skid'; B.t = 0; B.again = false; B.second = false; }   // a charge that lands ends a double charge, like one that crashes
     } else { const rel = (player.vx - B.vx) * h.nx + (player.vy - B.vy) * h.ny; if (rel < 0) { const j = -1.3 * rel / (1 / player.m + 1 / B.m); player.vx += j * h.nx / player.m; player.vy += j * h.ny / player.m; B.vx -= j * h.nx / B.m; B.vy -= j * h.ny / B.m; } }

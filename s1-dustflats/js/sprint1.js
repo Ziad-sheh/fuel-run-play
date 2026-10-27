@@ -7,7 +7,8 @@
 //         about 3x a gun wreck; fuel a hit leaked comes back if you wreck something within ~3 s (WON BACK).
 //   crack then ram  gun hits CRACK and stagger a raider; ramming a cracked one is a TAKEDOWN: a big refill, a crunch,
 //         and a chain bonus for takedowns in a row. Shield trucks only break to rams (guns deflect); flankers are fast
-//         side-runners the turret handles (rams glance off them unless cracked).
+//         side-runners the turret handles (rams glance off them unless cracked). A shield truck stays shielded all its
+//         life: only rams (and rocks or pile-ups a ram started) wear it down.
 // Everything here runs only in a variant run (s1On()): the existing demo, lab and campaign never reach it. It works by
 // wrapping a few existing functions (each wrapper hands straight back to the original outside a variant run).
 // Per-run numbers: window.S1_METRICS (and the result screen); every finished run: window.S1_HISTORY.
@@ -17,7 +18,7 @@ const S1T = SPRINT1_TUNING, S1Q = new URLSearchParams(location.search);
 const S1_VARIANTS = { road: 's1road', hybrid: 's1hybrid' };
 const S1_BOT = S1Q.get('bot') === '1', S1_SPEED = clamp(Math.round(+S1Q.get('speed') || 1), 1, 16), S1_SKILL = S1Q.get('skill') !== null ? clamp(+S1Q.get('skill'), 0, 1) : 1;
 const S1_GUN_SRC = { gun: 1, cannon: 1, rocket: 1 };
-let S1 = null, S1_LAST = null;   // this run's state; the last finished run (for the time from death to retry)
+let S1 = null, S1_LAST = null, S1_NAP = null;   // this run's state; the last death (for the time to retry); noAutoPause as it was before a bot run
 window.S1_METRICS = null; window.S1_HISTORY = [];
 const s1On = () => !!(S1 && demo && demo.L && demo.L.s1);
 
@@ -37,11 +38,13 @@ function s1NewState(v) {
   return { variant: v, chain: { n: 0, t: -99 }, leaks: [], flyers: [], lastHit: null, clr: null, ended: false, flashT: 0, waveIx: -1, spawnCD: 1.5, seen: {}, glanceT: -9, deflectT: -9,
     bot: { stuck: 0, esc: 0, dir: 1, lazy: false, lazyT: 0, dodge: 0, ddir: 1 },
     m: { variant: v, seed: null, bot: S1_BOT, speed: S1_SPEED, outcome: 'running', deathCause: null, runSeconds: 0, bullAtSecs: null, peakOnScreen: 0, onScreenNow: 0,
-      fuelFromRams: 0, fuelFromGuns: 0, fuelFromTakedowns: 0, fuelWonBack: 0, fuelFromBossRams: 0, fuelOther: 0, ramSharePct: null,
-      takedowns: 0, takedownsPerMin: 0, maxChain: 0, wrecks: { ram: 0, gun: 0, takedown: 0 }, hitsTaken: 0, offscreenHits: 0, offscreenDeaths: 0,
+      secsAt12Plus: 0, onScreenTimeline: [],   // visible enemies (centre inside the 390x844 view), every 5 s: [run second, count]
+      // fuel actually gained (what the tank took, capped by its size), by cause; ram share = ram-side / (ram-side + gun-side)
+      fuelFromRams: 0, fuelFromRamCrashes: 0, fuelFromTakedowns: 0, fuelFromBossRams: 0, fuelFromGuns: 0, fuelFromGunCrashes: 0, fuelWonBack: 0, fuelOther: 0, fuelEarned: 0, ramSharePct: null,
+      takedowns: 0, takedownsPerMin: 0, maxChain: 0, wrecks: { ram: 0, ramCrash: 0, takedown: 0, gun: 0, gunCrash: 0 }, hitsTaken: 0, offscreenHits: 0, offscreenDeaths: 0,
       timeToRetrySecs: null, clearings: [], tuningOverrides: S1T.overrides || {}, done: false } };
 }
-function s1Begin() {   // after demoStart: the fixed loadout instead of the opening card, the variant's drain, the card
+function s1Begin() {   // after demoStart: the fixed loadout instead of the opening card, the steady drain, the card
   const b = demo.build, items = Object.assign({}, S1T.loadout);
   b.offer = null; $('pick').hidden = true; $('pickReroll').hidden = true; state = 'play';
   b.items = items; b.order = Object.keys(items); b.choices = DRAFT_MAX; for (const id of b.order) eqFitted(id);
@@ -56,19 +59,19 @@ function s1End(won) {   // once a run: the outcome and the final numbers
   if (!won) {
     const H = S1.lastHit, fatalHit = H && time - H.t < 0.05 && runState && runState.lastLossSource !== 'drain';
     m.deathCause = fatalHit ? `hit (${H.source}${H.by ? ' · ' + H.by : ''})` : `out of fuel (drain${H ? `, last hit ${(time - H.t).toFixed(1)} s before by ${H.by || H.source}` : ''})`;
-    if (fatalHit && !H.visible) m.offscreenDeaths = 1;
+    if (fatalHit && H.visible === false) m.offscreenDeaths = 1;
     m.diedEarly = time < S1T.targets.earlyDeathSecs;
-    S1_LAST = { deathAt: performance.now(), m };
+    S1_LAST = { deathAt: performance.now(), m, level: demo.level };
   } else S1_LAST = null;
   m.done = true; s1Publish(); window.S1_HISTORY.push(m);
 }
 function s1Publish() {   // window.S1_METRICS: the live numbers (rounded)
   const m = S1.m, r1 = v => Math.round(v * 10) / 10;
   if (!m.done) m.runSeconds = r1(time);
-  const ram = m.fuelFromRams + m.fuelFromTakedowns, all = ram + m.fuelFromGuns;
+  const ram = m.fuelFromRams + m.fuelFromRamCrashes + m.fuelFromTakedowns + m.fuelFromBossRams, all = ram + m.fuelFromGuns + m.fuelFromGunCrashes;
   m.ramSharePct = all > 0 ? Math.round(ram / all * 100) : null;
   m.takedownsPerMin = time > 1 ? Math.round(m.takedowns / (time / 60) * 100) / 100 : 0;
-  for (const k of ['fuelFromRams', 'fuelFromGuns', 'fuelFromTakedowns', 'fuelWonBack', 'fuelFromBossRams', 'fuelOther']) m[k] = r1(m[k]);
+  for (const k of ['fuelFromRams', 'fuelFromRamCrashes', 'fuelFromTakedowns', 'fuelFromBossRams', 'fuelFromGuns', 'fuelFromGunCrashes', 'fuelWonBack', 'fuelOther', 'fuelEarned', 'secsAt12Plus']) m[k] = r1(m[k]);
   m.fuelNow = player ? r1(player.hp) : null;
   window.S1_METRICS = m;
 }
@@ -113,9 +116,11 @@ function s1Build() {
 function s1Tick(dt) {
   const L = demo.layout, A = L.arena, p = encProgress();
   s1Flyers(dt);
-  for (const k of cars) if (!k.dead && !k.flee && k.evTag >= 1000 && k.s1clr === undefined && Math.hypot(k.x - player.x, k.y - player.y) > 1500 && !inView(k.x, k.y, 200)) k.flee = true;   // left far behind: gives up
+  for (const k of cars) if (!k.dead && !k.flee && k.evTag >= 1000 && k.s1clr === undefined && Math.hypot(k.x - player.x, k.y - player.y) > 2600 && !inView(k.x, k.y, 200)) k.flee = true;   // lost for good (the road's raiders are normally brought back ahead first: s1Recycle)
   if (!A.sealed) { const below = player.y > A.gateY + 120 && Math.abs(player.x - A.x) > 140; depot.x = A.x; depot.y = below ? A.gateY + 160 : A.y; }   // the road's goal: line up under the gate, then into the bowl
-  const m = S1.m; m.onScreenNow = cars.filter(k => !k.dead && !k.stageBoss && inView(k.x, k.y, 0)).length; m.peakOnScreen = Math.max(m.peakOnScreen, m.onScreenNow);
+  const m = S1.m; m.onScreenNow = S1.vis = s1Visible(); m.peakOnScreen = Math.max(m.peakOnScreen, m.onScreenNow);
+  if (m.onScreenNow >= 12) m.secsAt12Plus += dt;
+  if (time >= (S1.tlT ?? 0)) { S1.tlT = Math.floor(time / 5) * 5 + 5; m.onScreenTimeline.push([Math.round(time), m.onScreenNow]); }
   S1.flashT = Math.max(0, S1.flashT - dt);
   // a cracked raider wobbles while it's staggered; a flanker jinks out of your nose's way
   const F = S1T.enemy.flank, pv = Math.hypot(player.vx, player.vy);
@@ -132,26 +137,42 @@ function s1Tick(dt) {
   if (S1.clr) { s1ClearingTick(dt); return; }
   const Q = L.clearings.find(Q => Q.state === 'open' && Math.hypot(player.x - Q.x, player.y - Q.y) < Q.R - S1T.clearings.lockDepth);
   if (Q) { s1Lock(Q); return; }
+  for (const P of L.clearings) if (P.state === 'open' && player.y < P.y - P.R - 300) { P.state = 'done'; S1.m.clearings.push({ i: P.i + 1, skipped: true }); }   // got past one without locking it (shouldn't happen: logged so it shows)
   s1Director(dt, p);
 }
 const s1Pick = mix => { const ks = Object.keys(mix), tot = ks.reduce((a, k) => a + mix[k], 0); let r = grand() * tot; for (const k of ks) { r -= mix[k]; if (r <= 0) return k; } return ks[0]; };
-function s1Director(dt, p) {   // the road: fill toward the current wave's count, a raider (or a pack of bikes) at a time, just off screen
+// enemies you can see: alive, not running off, centre inside the view (390x844 on a phone)
+const s1Visible = () => cars.filter(k => !k.dead && !k.flee && !k.stageBoss && inView(k.x, k.y, 0)).length;
+function s1Director(dt, p) {   // the road: keep the current wave's count of raiders IN VIEW, spawning just off the top and sides so they come on screen
   const W = S1T.spawn.waves; let wi = 0; for (let i = 0; i < W.length; i++) if (time >= W[i].t) wi = i;
   const w = W[wi]; heat.lv = w.heat;
   if (wi !== S1.waveIx) { if (S1.waveIx >= 0) banner = { text: `WAVE ${wi + 1}`, short: true, t: 0 }; S1.waveIx = wi; }
-  S1.spawnCD -= dt; if (p > S1T.road.stopSpawnsAt || S1.spawnCD > 0) return;
-  const active = cars.filter(k => !k.dead && !k.flee && !k.stageBoss).length + incoming.length, target = Math.min(S1T.spawn.cap, w.n);
-  if (active >= target) return;
-  const type = s1Pick(w.mix), from = type === 's1flank' ? pick(['L', 'R', 'behind']) : type === 's1shield' ? pick(['behind', 'ahead']) : pick(['behind', 'behind', 'L', 'R', 'ahead']);
+  s1Recycle(dt, p);
+  S1.spawnCD -= dt; if (S1.spawnCD > 0) return;
+  const active = cars.filter(k => !k.dead && !k.flee && !k.stageBoss).length;
+  if (S1.vis + incoming.length * 0.5 >= w.n || active + incoming.length >= S1T.spawn.cap) return;   // (a raider about to land counts half: it isn't in view yet)
+  const type = s1Pick(w.mix), from = p > 0.975 ? pick(['L', 'R', 'behind']) : type === 's1flank' ? pick(['L', 'R']) : s1Pick(S1T.spawn.from);   // (by the Bull's gate: nothing from ahead, inside its bowl)
   const pt = encSpawnPoint(from); if (!pt) return;
-  const n = type === 'scrap' ? Math.min(target - active, S1T.spawn.bikePack[0] + Math.floor(grand() * (S1T.spawn.bikePack[1] - S1T.spawn.bikePack[0] + 1))) : 1;
-  for (let i = 0; i < n; i++) incoming.push({ x: pt[0] + (i ? rand(-50, 50) : 0), y: pt[1] + (i ? rand(-50, 50) : 0), type, t: 1.2 + i * 0.05, ahead: from !== 'behind', evTag: 1000 });
+  const n = type === 'scrap' ? Math.min(Math.ceil(w.n - S1.vis - incoming.length * 0.5), S1T.spawn.bikePack[0] + Math.floor(grand() * (S1T.spawn.bikePack[1] - S1T.spawn.bikePack[0] + 1))) : 1;
+  for (let i = 0; i < Math.max(1, n); i++) incoming.push({ x: pt[0] + (i ? rand(-50, 50) : 0), y: pt[1] + (i ? rand(-50, 50) : 0), type, t: S1T.spawn.warn + i * 0.05, ahead: from !== 'behind', evTag: 1000 });
   S1.spawnCD = S1T.spawn.gap;
 }
-
+function s1Recycle(dt, p) {   // a road raider left behind out of sight comes round again: put back just off the top or a side, still hurt or cracked
+  const hh = VH / 2 / view.z, v = Math.hypot(player.vx, player.vy), fx = v > 60 ? player.vx / v : Math.cos(player.a), fy = v > 60 ? player.vy / v : Math.sin(player.a);
+  S1.recycleCD = (S1.recycleCD || 0) - dt;
+  for (const k of cars) {
+    if (k.dead || k.flee || k.stageBoss || k.s1clr !== undefined || !(k.evTag >= 1000)) continue;
+    if (inView(k.x, k.y, 60)) { k.s1outT = 0; continue; }
+    k.s1outT = (k.s1outT || 0) + dt;
+    if (k.s1outT < S1T.spawn.recycleSecs || S1.recycleCD > 0 || (k.x - player.x) * fx + (k.y - player.y) * fy > -hh * 0.5) continue;
+    const pt = encSpawnPoint(p > 0.975 ? pick(['L', 'R']) : pick(['ahead', 'ahead', 'L', 'R'])); if (!pt) continue;
+    const a = Math.atan2(player.y - pt[1], player.x - pt[0]); Object.assign(k, { x: pt[0], y: pt[1], a, vx: Math.cos(a) * 250, vy: Math.sin(a) * 250, pL: null, pR: null, mode: 'flank', modeT: 0, s1outT: 0 });
+    S1.recycleCD = 0.12; S1.m.recycled = (S1.m.recycled || 0) + 1;
+  }
+}
 // ============ hybrid: a locked clearing ============
 function s1Lock(Q) {
-  Q.state = 'locked'; Q.t = 0; S1.clr = Q; const Wv = S1T.clearings.waves[Math.min(Q.i, S1T.clearings.waves.length - 1)]; Q.left = Wv.total; Q.spawnCD = 0.6; Q.t0 = time;
+  Q.state = 'locked'; Q.t = 0; S1.clr = Q; const Wv = S1T.clearings.waves[Math.min(Q.i, S1T.clearings.waves.length - 1)]; Q.spawnCD = 0.4; Q.t0 = time;
   for (const k of cars) { if (k.dead || k.flee) continue; if (Math.hypot(k.x - Q.x, k.y - Q.y) < Q.R) { k.s1clr = Q.i; k.evTag = 1500 + Q.i; } else k.flee = true; }   // who's in with you is part of the fight; the rest are shut out
   incoming = [];
   depot.tanks = Q.bars; rebuildLists();   // the barricades: solid while it's locked
@@ -163,17 +184,19 @@ function s1ClearingTick(dt) {
   const Q = S1.clr, Wv = S1T.clearings.waves[Math.min(Q.i, S1T.clearings.waves.length - 1)]; Q.t += dt; heat.lv = Wv.heat;
   const mine = cars.filter(k => !k.dead && !k.flee && k.s1clr === Q.i).length + incoming.filter(I => I.s1clr === Q.i).length;
   Q.spawnCD -= dt;
-  if (Q.left > 0 && Q.spawnCD <= 0 && mine < Wv.atOnce) {
-    const type = s1Pick(Wv.mix), n = type === 'scrap' ? Math.min(Q.left, Wv.atOnce - mine, 3) : 1, pt = s1ClearingPoint(Q);
-    if (pt) { for (let i = 0; i < n; i++) incoming.push({ x: pt[0] + (i ? rand(-40, 40) : 0), y: pt[1] + (i ? rand(-40, 40) : 0), type, t: 1.0 + i * 0.05, ahead: true, fixed: true, evTag: 1500 + Q.i, s1clr: Q.i }); Q.left -= n; }
+  const spawning = Q.t < Wv.spawnSecs;
+  if (spawning && Q.spawnCD <= 0 && mine < Wv.atOnce) {
+    const type = s1Pick(Wv.mix), n = type === 'scrap' ? Math.min(Wv.atOnce - mine, 3) : 1, pt = s1ClearingPoint(Q);
+    if (pt) for (let i = 0; i < n; i++) incoming.push({ x: pt[0] + (i ? rand(-40, 40) : 0), y: pt[1] + (i ? rand(-40, 40) : 0), type, t: 0.8 + i * 0.05, ahead: true, fixed: true, evTag: 1500 + Q.i, s1clr: Q.i });
     Q.spawnCD = Wv.gap;
   }
-  if ((Q.left <= 0 && mine === 0) || Q.t > S1T.clearings.maxSecs) s1Unlock(Q, Q.left <= 0 && mine === 0);
+  Q.left = mine; Q.hold = spawning ? Wv.spawnSecs - Q.t : 0;
+  if ((!spawning && mine === 0) || Q.t > S1T.clearings.maxSecs) s1Unlock(Q, !spawning && mine === 0);
 }
-function s1ClearingPoint(Q) {   // inside the clearing, away from you, out of sight if it can be
-  for (let pass = 0; pass < 2; pass++) for (let i = 0; i < 20; i++) {
-    const a = grand() * TAU, d = Q.R * (0.45 + grand() * 0.42), x = Q.x + Math.cos(a) * d, y = Q.y + Math.sin(a) * d;
-    if (blocked(x, y, 34) || Math.hypot(x - player.x, y - player.y) < 420) continue;
+function s1ClearingPoint(Q) {   // inside the clearing, 300-650 from you, out of sight if it can be
+  for (let pass = 0; pass < 2; pass++) for (let i = 0; i < 30; i++) {
+    const a = grand() * TAU, d = Q.R * (0.1 + grand() * 0.78), x = Q.x + Math.cos(a) * d, y = Q.y + Math.sin(a) * d;
+    const dp = Math.hypot(x - player.x, y - player.y); if (blocked(x, y, 34) || dp < 300 || dp > 650) continue;   // close by, so they're on you (and on screen) in a moment
     if (pass === 0 && inView(x, y, 30)) continue;
     return [x, y];
   }
@@ -189,10 +212,11 @@ function s1Unlock(Q, cleared) {
 }
 
 // ============ fuel: wrecks refill instantly, takedowns burst, a hit can be won back ============
-function s1Refill(x, y, n, bucket) {   // the fuel goes in now; blobs fly from the wreck to the car to show it
+const S1_BUCKET = { ram: 'fuelFromRams', ramCrash: 'fuelFromRamCrashes', takedown: 'fuelFromTakedowns', bossram: 'fuelFromBossRams', gun: 'fuelFromGuns', gunCrash: 'fuelFromGunCrashes', won: 'fuelWonBack' };
+function s1Refill(x, y, n, bucket) {   // the fuel goes in now (the metrics count what the tank really took); blobs fly from the wreck to the car to show it
   if (n <= 0) return 0;
   const got = changeFuel(n, 's1_' + bucket); player.ghost = Math.max(player.ghost, player.hp);
-  const m = S1.m; if (bucket === 'ram') m.fuelFromRams += n; else if (bucket === 'gun') m.fuelFromGuns += n; else if (bucket === 'takedown') m.fuelFromTakedowns += n; else if (bucket === 'won') m.fuelWonBack += n; else if (bucket === 'bossram') m.fuelFromBossRams += n; else m.fuelOther += n;
+  const m = S1.m; m[S1_BUCKET[bucket] || 'fuelOther'] += got; m.fuelEarned += n;
   const blobs = Math.min(14, 2 + Math.round(n / 3));
   for (let i = 0; i < blobs; i++) { const a = crand(0, TAU), sp = crand(120, 260); S1.flyers.push({ x: x + crand(-10, 10), y: y + crand(-10, 10), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, t: -i * 0.02, gold: bucket === 'won' || bucket === 'takedown' }); }
   $('hp').classList.remove('gain'); void $('hp').offsetWidth; $('hp').classList.add('gain');
@@ -205,17 +229,26 @@ function s1Flyers(dt) {   // they spray out, then home onto the car
   S1.flyers = S1.flyers.filter(f => !f.dead);
   S1.leaks = S1.leaks.filter(l => !l.used && time - l.t <= S1T.fuel.winBackSecs);
 }
-function s1OnWreck(k, src) {   // a wreck you caused: how it went decides the refill (a crash counts for whatever started it: your ram or your gun)
-  const F = S1T.fuel, K = F.typeK[k.type] ?? 1, m = S1.m; let kind, n;
+// A wreck you caused, by how it happened: takedown (a ram on a cracked raider) · ram (your car's own hit: nose, side, tail,
+// nitro) · gun (a round) · ramCrash / gunCrash (into rock, a wall, a drum or another raider, started by your ram or your gun).
+const S1_DIRECT = { ram: 1, ability: 1, weapon: 1 };
+function s1WreckKind(k, src, word, cause) {
+  if (k.s1td) return 'takedown';
+  if (S1_GUN_SRC[src]) return 'gun';
+  const how = (cause && cause.kind) || WORD_KIND[word] || 'ram';
+  if (S1_DIRECT[how]) return how === 'weapon' ? 'gun' : 'ram';
+  return k.cause && k.cause.kind === 'weapon' ? 'gunCrash' : 'ramCrash';
+}
+function s1OnWreck(k, src, word, cause) {   // the refill: takedown burst, ram (or ram-started crash) 3x, gun (or gun-started crash) 1x
+  const F = S1T.fuel, K = F.typeK[k.type] ?? 1, m = S1.m; let kind = s1WreckKind(k, src, word, cause), n;
   if (k.s1td) {
     const C = S1T.chain; S1.chain.n = time - S1.chain.t <= C.window ? S1.chain.n + 1 : 1; S1.chain.t = time; m.maxChain = Math.max(m.maxChain, S1.chain.n);
-    const mult = Math.min(C.max, 1 + C.step * (S1.chain.n - 1)); kind = 'takedown'; n = F.takedownBurst * K * mult; m.takedowns++;
+    const mult = Math.min(C.max, 1 + C.step * (S1.chain.n - 1)); n = F.takedownBurst * K * mult; m.takedowns++;
     s1Crunch(k, S1.chain.n, mult);
-  } else if (S1_GUN_SRC[src] || (k.cause && k.cause.kind === 'weapon')) { kind = 'gun'; n = F.gunWreck * K; }   // the gun's own wreck, or a pile-up / rock crash the gun started
-  else { kind = 'ram'; n = F.gunWreck * F.ramMult * K; }
+  } else n = F.gunWreck * K * (kind === 'gun' || kind === 'gunCrash' ? 1 : F.ramMult) * (kind === 'ramCrash' || kind === 'gunCrash' ? F.crashK : 1);
   m.wrecks[kind]++;
   s1Refill(k.x, k.y, n, kind);
-  pops.push({ x: k.x, y: k.y - 58, text: `+${Math.round(n)}`, col: kind === 'takedown' ? '#ffd23f' : '#5be37d', t: 0, small: kind === 'gun' ? 2 : 1 });
+  if (n >= 0.95) pops.push({ x: k.x, y: k.y - 58, text: `+${Math.round(n)}`, col: kind === 'takedown' ? '#ffd23f' : '#5be37d', t: 0, small: kind === 'gun' || kind === 'gunCrash' ? 2 : 1 });
   const back = S1.leaks.filter(l => !l.used && time - l.t <= F.winBackSecs); if (back.length) {   // the leak you just took, won back
     let sum = 0; for (const l of back) { l.used = true; sum += l.n; } sum *= F.winBackFrac;
     if (sum >= 0.5) { s1Refill(k.x, k.y, sum, 'won'); pops.push({ x: player.x, y: player.y - 92, text: `WON BACK +${Math.round(sum)}!`, col: '#ffd23f', t: 0 }); parts.push({ k: 'ring', x: player.x, y: player.y, t: 0, life: 0.4, R: 120 }); SFX.coin(); }
@@ -247,8 +280,8 @@ s1Wrap('encBuild', (keep, a) => s1On() ? s1Build() : keep.apply(null, a));
 s1Wrap('encTick', (keep, a) => s1On() ? s1Tick(a[0]) : keep.apply(null, a));
 s1Wrap('demoStart', (keep, a) => {
   const L = DEMO_LEVELS[a[0]];
-  if (S1_LAST && S1_LAST.m.timeToRetrySecs === null) S1_LAST.m.timeToRetrySecs = Math.round((performance.now() - S1_LAST.deathAt) / 100) / 10;   // from the fatal moment to the next run's start (real seconds)
-  S1_LAST = null; S1 = L && L.s1 ? s1NewState(L.s1) : null;
+  if (S1_LAST && S1_LAST.level === a[0] && S1_LAST.m.timeToRetrySecs === null) S1_LAST.m.timeToRetrySecs = Math.round((performance.now() - S1_LAST.deathAt) / 100) / 10;   // a retry: the same variant again, timed from the fatal moment (real seconds); switching variants isn't one
+  S1_LAST = null; S1 = L && L.s1 ? s1NewState(L.s1) : null; s1AutoPause();
   const r = keep.apply(null, a);
   if (S1) s1Begin();
   return r;
@@ -258,7 +291,7 @@ s1Wrap('landCar', (keep, a) => {
   const I = a[0], k = cars[cars.length - 1]; if (!k || k.stageBoss || k.T.elite || k.T.convoy) return r;
   const pips = S1T.enemy.pips[k.type]; if (pips) k.hp = k.maxHp = pips * PIP;
   if (I.s1clr !== undefined) k.s1clr = I.s1clr;
-  if (k.type === 's1shield') { k.s1shield = true; if (!S1.seen.shield) { S1.seen.shield = true; pops.push({ x: player.x, y: player.y - 100, text: 'SHIELD TRUCK · ONLY RAMS BREAK IT', col: '#7fb6ff', t: 0, small: 1 }); } }
+  if (k.type === 's1shield') { k.s1shield = true; if (!S1.seen.shield) { S1.seen.shield = true; pops.push({ x: player.x, y: player.y - 100, text: 'SHIELD TRUCK · ONLY RAMS HURT IT', col: '#7fb6ff', t: 0, small: 1 }); } }
   if (k.type === 's1flank') { const F = S1T.enemy.flank; k.s1flank = true; k.slot = 'FLANK'; k.slotLon = rand(-40, 60); k.slotLat = rand(F.slotLat[0], F.slotLat[1]); k.side = grand() < 0.5 ? -1 : 1; k.rear = k.front = false; if (!S1.seen.flank) { S1.seen.flank = true; pops.push({ x: player.x, y: player.y - 100, text: 'FLANKERS · LET THE TURRET WORK', col: '#7fe8f0', t: 0, small: 1 }); } }
   return r;
 });
@@ -266,7 +299,7 @@ s1Wrap('wreck', (keep, a) => {
   const k = a[0]; if (!s1On() || !k || k.dead) return keep.apply(null, a);
   const c0 = runState ? runState.totals.credited : 0; S1.inWreck = true;
   try { keep.apply(null, a); } finally { S1.inWreck = false; }
-  if (runState && runState.totals.credited > c0 && state === 'play') s1OnWreck(k, a[2] || 'trick');
+  if (runState && runState.totals.credited > c0 && state === 'play') s1OnWreck(k, a[2] || 'trick', a[1], a[4]);
 });
 s1Wrap('dropGem', (keep, a) => {   // no pickups in a variant run: a can becomes an instant refill, coins and gems don't drop
   if (!s1On()) return keep.apply(null, a);
@@ -274,9 +307,9 @@ s1Wrap('dropGem', (keep, a) => {   // no pickups in a variant run: a can becomes
 });
 s1Wrap('hitRaider', (keep, a) => {
   const [k] = a; if (!s1On() || !k || k.dead || k.stageBoss) return keep.apply(null, a);
-  if (k.s1shield) {   // only a ram breaks it; this ram hurts as well
-    k.s1shield = false; k.stun = Math.max(k.stun, 0.8); SFX.clang(); pops.push({ x: k.x, y: k.y - 60, text: 'SHIELD BROKEN!', col: '#7fb6ff', t: 0, small: 1 });
-    for (let i = 0; i < 10; i++) parts.push({ k: 'spark', x: k.x + crand(-20, 20), y: k.y + crand(-20, 20), vx: crand(-300, 300), vy: crand(-300, 300), t: 0, life: 0.3 });
+  if (k.s1shield) {   // rams are the only way through: each one dents it (the shield stays up for good)
+    k.s1ramT = time; k.stun = Math.max(k.stun, 0.5); SFX.clang();
+    for (let i = 0; i < 8; i++) parts.push({ k: 'spark', x: k.x + crand(-20, 20), y: k.y + crand(-20, 20), vx: crand(-300, 300), vy: crand(-300, 300), t: 0, life: 0.3 });
     return keep.apply(null, a);
   }
   if (s1Cracked(k)) { s1Takedown(k); return; }
@@ -297,21 +330,16 @@ s1Wrap('eqHitCar', (keep, a) => {
   s1Crack(k);
   return keep.call(null, k, n * S1T.crack.gunDmgK, src, a[3], a[4], a[5]);
 });
-s1Wrap('hurt', (keep, a) => {   // a landed hit: remembered (who, seen or not) before the original runs, since it may end the run
+s1Wrap('hurt', (keep, a) => {   // a landed hit: who did it (passed in by the caller) and whether it was in view, kept before the original runs, since it may end the run
   if (!s1On()) return keep.apply(null, a);
-  const [, soft, source] = a, hp0 = player.hp, prev = S1.lastHit;
-  if (!soft) { const att = s1Attacker(source); S1.lastHit = { t: time, source: source || 'impact', by: att ? att.name : null, visible: att ? inView(att.x, att.y, -6) : true }; }
+  const [, soft, source, by] = a, hp0 = player.hp, prev = S1.lastHit;
+  if (!soft && time < S1T.fuel.earlyHit.secs) a[0] *= S1T.fuel.earlyHit.k;   // the opening minute and a half: hits leak less while you learn
+  if (!soft) S1.lastHit = { t: time, source: source || 'impact', by: by ? by.name || (by.T && by.T.name) || (by.kind === 'bull' || by === boss ? 'The Bull' : by.type) : null, visible: by ? inView(by.x, by.y, -6) : null };
   const took = keep.apply(null, a);
-  if (!soft) { if (player.hp < hp0) { S1.leaks.push({ t: time, n: hp0 - player.hp, used: false }); S1.m.hitsTaken++; if (!S1.lastHit.visible) S1.m.offscreenHits++; } else S1.lastHit = prev; }
+  if (!soft) { if (player.hp < hp0) { S1.leaks.push({ t: time, n: hp0 - player.hp, used: false }); S1.m.hitsTaken++; if (S1.lastHit.visible === false) S1.m.offscreenHits++; else if (S1.lastHit.visible === null) S1.m.unattributedHits = (S1.m.unattributedHits || 0) + 1; } else S1.lastHit = prev; }
   return took;
 });
-function s1Attacker(source) {   // who landed the hit: the raider touching you, the boss, or where a shell came from
-  if (source === 'boss' && boss) return { x: boss.x, y: boss.y, name: 'The Bull' };
-  let best = null, bd = 150; for (const k of cars) { if (k.dead) continue; const d = Math.hypot(k.x - player.x, k.y - player.y) - k.r; if (d < bd) { bd = d; best = k; } }
-  if (best) return { x: best.x, y: best.y, name: best.T.name };
-  const b = bombs.find(b => b.dead && Math.hypot(b.tx - player.x, b.ty - player.y) < 90); if (b) return { x: b.sx, y: b.sy, name: 'shell' };
-  return null;
-}
+
 s1Wrap('carHit', (keep, a) => {   // two raiders meeting hard: in a crowd this would wreck pairs outright all day, so here it dents (pileupPips) instead
   if (!s1On()) return keep.apply(null, a);
   const [p, q, h] = a;
@@ -324,12 +352,11 @@ s1Wrap('carHit', (keep, a) => {   // two raiders meeting hard: in a crowd this w
   }
   if (!p.dead && !q.dead) bump(p, q, h);
 });
-s1Wrap('burnFuel', (keep, a) => {   // the variant's drains (the same rules otherwise)
+s1Wrap('burnFuel', (keep, a) => {   // one steady drain, all run (road, clearings, The Bull's arena)
   if (!s1On()) return keep.apply(null, a);
   const dt = a[0];
   if (state !== 'play' || runHeld() || god || (runState && runState.outcome !== 'active')) return;
-  const [k0, t0, t1] = S1T.fuel.drainEarly, early = k0 + (1 - k0) * clamp((time - t0) / (t1 - t0), 0, 1);
-  changeFuel(-(demo.layout.arena.sealed ? S1T.fuel.arenaDrain : S1T.fuel.drain * early) * dt, 'drain');
+  changeFuel(-S1T.fuel.drain * dt, 'drain');
   if (player.hp < player.maxHp * 0.25) { fuelLowT -= dt; if (fuelLowT <= 0) { fuelLowT = 1.2; SFX.ping(); } tip('lowfuel', 'LOW FUEL · WRECK RAIDERS TO REFILL'); }
   if (player.hp <= 0) { player.hp = 0; outCause = 'OUT OF FUEL!'; if (runState) runState.lastLossSource = 'drain'; gameOver(); }
 });
@@ -345,8 +372,8 @@ s1Wrap('bossHit', (keep, a) => {   // a tank ram on The Bull refills too
 s1Wrap('demoResults', (keep, a) => {
   const r = keep.apply(null, a); if (!s1On()) return r;
   s1End(!!a[0]); const m = S1.m, f = v => Math.round(v);
-  const rows = [['Variant', `${m.variant.toUpperCase()} · ${m.outcome === 'clear' ? 'CLEAR' : 'DEATH'}`], ['Bull at · peak', `${m.bullAtSecs === null ? '—' : fmt(m.bullAtSecs)} · ${m.peakOnScreen} on screen`],
-    ['Fuel ram/gun/TD', `${f(m.fuelFromRams)} / ${f(m.fuelFromGuns)} / ${f(m.fuelFromTakedowns)}`], ['Ram share', `${m.ramSharePct === null ? '—' : m.ramSharePct + '%'} · won back ${f(m.fuelWonBack)}`],
+  const rows = [['Variant', `${m.variant.toUpperCase()} · ${m.outcome === 'clear' ? 'CLEAR' : 'DEATH'}`], ['Bull at · peak', `${m.bullAtSecs === null ? '—' : fmt(m.bullAtSecs)} · ${m.peakOnScreen} seen · ${Math.round(m.secsAt12Plus)}s 12+`],
+    ['Fuel ram/gun/TD', `${f(m.fuelFromRams + m.fuelFromRamCrashes + m.fuelFromBossRams)} / ${f(m.fuelFromGuns + m.fuelFromGunCrashes)} / ${f(m.fuelFromTakedowns)}`], ['Ram share', `${m.ramSharePct === null ? '—' : m.ramSharePct + '%'} · won back ${f(m.fuelWonBack)}`],
     ['Takedowns', `${m.takedowns} · ${m.takedownsPerMin}/min · x${m.maxChain}`]];
   if (m.outcome === 'death') rows.push(['Death', `${m.deathCause}${m.offscreenDeaths ? ' · OFF SCREEN' : ''}`]);
   if (m.clearings.length) rows.push(['Clearings', m.clearings.map(c => `${Math.round(c.secs)}s`).join(' · ')]);
@@ -361,16 +388,20 @@ s1Wrap('renderDemoMenu', (keep, a) => {   // the variants stay off the demo's me
 });
 
 // ============ drawing (placeholder art) ============
-function s1DrawGround() {   // on the ground layer: each clearing's floor, and its barricades while it's locked
+function s1DrawGround() {   // on the ground layer: each clearing's floor and edge, its way in, and its barricades while it's locked
   const L = demo.layout;
   for (const Q of L.clearings) {
     if (!inView(Q.x, Q.y, Q.R + 150)) continue;
-    ctx.save(); const g = ctx.createRadialGradient(Q.x, Q.y, 80, Q.x, Q.y, Q.R + 30); g.addColorStop(0, 'rgba(120,70,40,.22)'); g.addColorStop(1, 'rgba(120,70,40,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(Q.x, Q.y, Q.R + 30, 0, TAU); ctx.fill();
-    if (Q.state === 'open') { ctx.strokeStyle = 'rgba(232,67,47,.55)'; ctx.lineWidth = 6; ctx.setLineDash([16, 14]); ctx.beginPath(); ctx.arc(Q.x, Q.y, Q.R - S1T.clearings.lockDepth, 0, TAU); ctx.stroke(); ctx.setLineDash([]); }
-    if (Q.state === 'locked') for (const b of Q.bars) {   // a heap of wrecks: two crushed car bodies, a tyre, hazard stripes
-      ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.ph);
+    const Rb = Q.R + 62;
+    ctx.save(); const g = ctx.createRadialGradient(Q.x, Q.y, 80, Q.x, Q.y, Q.R + 30); g.addColorStop(0, 'rgba(120,70,40,.28)'); g.addColorStop(1, 'rgba(120,70,40,.08)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(Q.x, Q.y, Q.R + 30, 0, TAU); ctx.fill();
+    const locked = Q.state === 'locked';   // the edge: a bold ring just inside the rock (hazard red while it's shut)
+    ctx.lineWidth = 14; ctx.strokeStyle = INK; ctx.beginPath(); ctx.arc(Q.x, Q.y, Q.R - 4, 0, TAU); ctx.stroke();
+    ctx.lineWidth = 8; ctx.setLineDash([34, 22]); ctx.lineDashOffset = locked ? -clock * 60 : 0; ctx.strokeStyle = locked ? (Math.floor(clock * 4) % 2 ? '#e8432f' : '#ffd23f') : Q.state === 'done' ? 'rgba(255,244,220,.5)' : '#ff9a3c'; ctx.beginPath(); ctx.arc(Q.x, Q.y, Q.R - 4, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    if (Q.state === 'open') { ctx.font = `46px ${FONT}`; ctx.textAlign = 'center'; ctx.lineWidth = 8; ctx.strokeStyle = INK; const ty = Q.y + Q.R - 140; ctx.strokeText('LOCKED CLEARING', Q.x, ty); ctx.fillStyle = '#ff9a3c'; ctx.fillText('LOCKED CLEARING', Q.x, ty); }
+    if (locked) for (const b of Q.bars) {   // a heap of wrecks: two crushed car bodies, a tyre, hazard stripes
+      ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.ph); ctx.scale(1.3, 1.3);
       inkRR(ctx, -48, -24, 70, 34, 6, '#7a3a22', { lw: 2.6 }); ctx.rotate(0.7); inkRR(ctx, -20, -10, 66, 30, 6, '#5c626a', { lw: 2.6 }); inkCircle(ctx, -30, 22, 13, '#24160f', { lw: 2, double: false });
-      ctx.rotate(-0.7); ctx.fillStyle = Math.floor(clock * 3 + b.ph) % 2 ? '#ffd23f' : '#e8432f'; ctx.fillRect(-30, -6, 40, 8); ctx.strokeStyle = INK; ctx.lineWidth = 2; ctx.strokeRect(-30, -6, 40, 8);
+      ctx.rotate(-0.7); for (let i = 0; i < 4; i++) { ctx.fillStyle = (i + Math.floor(clock * 3)) % 2 ? '#ffd23f' : '#e8432f'; ctx.fillRect(-40 + i * 16, -8, 16, 12); } ctx.strokeStyle = INK; ctx.lineWidth = 2.5; ctx.strokeRect(-40, -8, 64, 12);
       ctx.restore();
     }
     ctx.restore();
@@ -381,20 +412,24 @@ function s1DrawOver() {   // over the world: cracked raiders, shields, flankers'
   for (const k of cars) {
     if (k.dead || !inView(k.x, k.y, 60)) continue;
     const R = k.r * (k.size || 1) * 1.55 + 6;
-    if (s1Cracked(k)) {   // a jagged yellow-white outline and crack lines: RAM ME
+    if (s1Cracked(k)) {   // CRACKED: a yellow glow, a jagged outline, crack lines, and RAM! over it
       const left = (k.s1crackT - time) / S1T.crack.secs, pulse = 1 + Math.sin(clock * 18) * 0.06;
-      ctx.save(); ctx.translate(k.x, k.y); ctx.scale(pulse, pulse); starPath(ctx, 0, 0, R + 4, 11, 0.8, clock * 2);
-      ctx.lineWidth = 6; ctx.strokeStyle = INK; ctx.stroke(); ctx.lineWidth = 3; ctx.strokeStyle = left > 0.3 || Math.floor(clock * 10) % 2 ? '#ffd23f' : '#fff4dc'; ctx.stroke();
-      ctx.strokeStyle = '#fff4dc'; ctx.lineWidth = 2; ctx.beginPath(); for (let i = 0; i < 3; i++) { const a = k.ph * 7 + i * 2.1; ctx.moveTo(Math.cos(a) * 4, Math.sin(a) * 4); ctx.lineTo(Math.cos(a + 0.3) * R * 0.55, Math.sin(a + 0.3) * R * 0.55); ctx.lineTo(Math.cos(a - 0.1) * R * 0.85, Math.sin(a - 0.1) * R * 0.85); } ctx.stroke();
+      ctx.save(); ctx.translate(k.x, k.y); ctx.globalAlpha = 0.35; ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.arc(0, 0, R + 6, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.save(); ctx.scale(pulse, pulse); starPath(ctx, 0, 0, R + 6, 11, 0.8, clock * 2);
+      ctx.lineWidth = 7; ctx.strokeStyle = INK; ctx.stroke(); ctx.lineWidth = 4; ctx.strokeStyle = left > 0.3 || Math.floor(clock * 10) % 2 ? '#ffd23f' : '#fff4dc'; ctx.stroke();
+      ctx.strokeStyle = '#fff4dc'; ctx.lineWidth = 2.5; ctx.beginPath(); for (let i = 0; i < 3; i++) { const a = k.ph * 7 + i * 2.1; ctx.moveTo(Math.cos(a) * 4, Math.sin(a) * 4); ctx.lineTo(Math.cos(a + 0.3) * R * 0.55, Math.sin(a + 0.3) * R * 0.55); ctx.lineTo(Math.cos(a - 0.1) * R * 0.85, Math.sin(a - 0.1) * R * 0.85); } ctx.stroke(); ctx.restore();
+      ctx.font = `26px ${FONT}`; ctx.textAlign = 'center'; ctx.lineWidth = 6; ctx.strokeStyle = INK; ctx.strokeText('RAM!', 0, -R - 16); ctx.fillStyle = '#ffd23f'; ctx.fillText('RAM!', 0, -R - 16);
       ctx.restore();
     }
-    if (k.s1shield) {   // a blue bubble that flashes when rounds bounce off
-      const hit = time - (k.s1deflT || -9) < 0.12; ctx.save(); ctx.globalAlpha = hit ? 0.75 : 0.4; ctx.fillStyle = '#7fb6ff'; ctx.beginPath(); ctx.arc(k.x, k.y, R + 8, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
-      ctx.lineWidth = 4; ctx.strokeStyle = hit ? '#fff' : '#2f6fd0'; ctx.beginPath(); ctx.arc(k.x, k.y, R + 8, 0, TAU); ctx.stroke(); ctx.restore();
+    if (k.s1shield) {   // SHIELD: a solid blue bubble with a thick rim and a shield badge; it flashes white when rounds bounce off, red when rammed
+      const hit = time - (k.s1deflT || -9) < 0.12, rammed = time - (k.s1ramT || -9) < 0.25; ctx.save(); ctx.globalAlpha = hit ? 0.7 : 0.38; ctx.fillStyle = rammed ? '#ff8a6a' : '#7fb6ff'; ctx.beginPath(); ctx.arc(k.x, k.y, R + 10, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.lineWidth = 9; ctx.strokeStyle = INK; ctx.beginPath(); ctx.arc(k.x, k.y, R + 10, 0, TAU); ctx.stroke(); ctx.lineWidth = 5; ctx.strokeStyle = hit ? '#fff' : '#2f6fd0'; ctx.stroke();
+      ctx.translate(k.x, k.y - R - 26); ctx.beginPath(); ctx.moveTo(-13, -12); ctx.lineTo(13, -12); ctx.lineTo(13, 2); ctx.quadraticCurveTo(13, 12, 0, 17); ctx.quadraticCurveTo(-13, 12, -13, 2); ctx.closePath(); ctx.fillStyle = '#2f6fd0'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.stroke(); ctx.restore();
     }
-    if (k.s1flank) {   // cyan chevrons on its flanks: a side-runner
-      ctx.save(); ctx.translate(k.x, k.y); ctx.rotate(k.a); ctx.strokeStyle = '#36c8d8'; ctx.lineWidth = 4; ctx.lineCap = 'round';
-      for (const s of [-1, 1]) { ctx.beginPath(); ctx.moveTo(-14, s * (R - 2)); ctx.lineTo(0, s * (R + 6)); ctx.lineTo(14, s * (R - 2)); ctx.stroke(); }
+    if (k.s1flank) {   // FLANKER: a cyan ring and big chevrons on its sides
+      ctx.save(); ctx.translate(k.x, k.y); ctx.lineWidth = 4; ctx.strokeStyle = '#36c8d8'; ctx.setLineDash([8, 6]); ctx.beginPath(); ctx.arc(0, 0, R + 4, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+      ctx.rotate(k.a); ctx.lineCap = 'round';
+      for (const s of [-1, 1]) { ctx.beginPath(); ctx.moveTo(-16, s * (R + 2)); ctx.lineTo(0, s * (R + 14)); ctx.lineTo(16, s * (R + 2)); ctx.lineWidth = 9; ctx.strokeStyle = INK; ctx.stroke(); ctx.lineWidth = 5; ctx.strokeStyle = '#36c8d8'; ctx.stroke(); }
       ctx.restore();
     }
   }
@@ -410,7 +445,9 @@ function s1DrawOver() {   // over the world: cracked raiders, shields, flankers'
   const lk = S1.leaks.filter(l => !l.used && time - l.t <= S1T.fuel.winBackSecs);
   if (lk.length && state === 'play') { const [sx, sy] = toScreen(player.x, player.y), left = S1T.fuel.winBackSecs - (time - Math.min(...lk.map(l => l.t))), n = Math.round(lk.reduce((s, l) => s + l.n, 0) * S1T.fuel.winBackFrac);
     ctx.font = `19px ${FONT}`; ink(`WRECK ONE · WIN BACK ${n}`, sx, sy + 62, Math.floor(clock * 6) % 2 ? '#ff5a46' : '#fff4dc'); ctx.fillStyle = INK; ctx.fillRect(sx - 42, sy + 68, 84, 7); ctx.fillStyle = '#ff5a46'; ctx.fillRect(sx - 40, sy + 70, 80 * clamp(left / S1T.fuel.winBackSecs, 0, 1), 3); }
-  if (S1.clr && state === 'play') { const Q = S1.clr, mine = cars.filter(k => !k.dead && !k.flee && k.s1clr === Q.i).length + incoming.filter(I => I.s1clr === Q.i).length; ctx.font = `20px ${FONT}`; ink(`CLEARING ${Q.i + 1} · ${Q.left + mine} LEFT`, VW / 2, 190, '#ff9a3c'); }
+  if (S1.clr && state === 'play') { const Q = S1.clr, mine = cars.filter(k => !k.dead && !k.flee && k.s1clr === Q.i).length + incoming.filter(I => I.s1clr === Q.i).length; ctx.font = `20px ${FONT}`; ink(Q.hold > 0 ? `CLEARING ${Q.i + 1} · HOLD ON ${Math.ceil(Q.hold)}s` : `CLEARING ${Q.i + 1} · ${mine} LEFT`, VW / 2, 190, '#ff9a3c'); }
+  if (state === 'play') for (const k of cars.filter(k => !k.dead && !k.flee && !k.stageBoss && !inView(k.x, k.y, 0) && Math.hypot(k.x - player.x, k.y - player.y) < 900).sort((a, b) => Math.hypot(a.x - player.x, a.y - player.y) - Math.hypot(b.x - player.x, b.y - player.y)).slice(0, 5))
+    edgeArrow(k.x, k.y, k.s1shield ? '#4f8fe8' : k.s1flank ? '#36c8d8' : s1Cracked(k) ? '#ffd23f' : '#e8432f', ATTACK_MODES.has(k.mode) || k.mode === 'wind' || k.mode === 'tell' ? 1.3 : 0.85);   // threats just off screen: an arrow at the edge, bigger when it's attacking
   ctx.textAlign = 'left'; ctx.font = `13px ${FONT}`; ink(`S1 ${S1.variant.toUpperCase()}${S1_BOT ? ' · BOT' : ''}${S1_SPEED > 1 ? ' x' + S1_SPEED : ''}`, 8, VH - 8, '#fff4dc');
   ctx.restore();
 }
@@ -426,11 +463,13 @@ function s1Bot() {
   if (boss && !boss.dead) want = s1BotBoss();
   else {
     const Q = S1.clr, ty = py - 450;
+    const N = !Q && L.clearings.find(P => P.state === 'open' && py > P.y && py - P.y < P.R + 1600);   // a clearing coming up: make for its way in (the road's mouth), not the raiders
     if (Q) { const a = Math.atan2(py - Q.y, px - Q.x) + 0.6; want = Math.atan2(Q.y + Math.sin(a) * Q.R * 0.45 - py, Q.x + Math.cos(a) * Q.R * 0.45 - px); }
+    else if (N) { const yi = N.y + N.R + 120, gx = py > yi + 40 ? roadAt(L.road, yi) : N.x, gy = py > yi + 40 ? yi : N.y; want = Math.atan2(gy - py, gx - px); }
     else if (py < A.gateY + 500 || A.sealed) want = Math.atan2(A.y - py, A.x - px);
     else want = Math.atan2(ty - py, roadAt(L.road, ty) - px);
     const goal = want;
-    if (!B.lazy) {
+    if (!B.lazy && !N) {
       const rel = k => { const dx = k.x - px, dy = k.y - py; return { k, d: Math.hypot(dx, dy), a: angDiff(pa, Math.atan2(dy, dx)), lon: dx * Math.cos(pa) + dy * Math.sin(pa), lat: -dx * Math.sin(pa) + dy * Math.cos(pa) }; };
       const near = (k) => Q ? true : Math.abs(k.x - roadAt(L.road, k.y)) < 520 && Math.abs(angDiff(goal, Math.atan2(k.y - py, k.x - px))) < 1.6;
       const foes = cars.filter(k => !k.dead && !k.flee && !k.stageBoss && near(k)).map(rel);
@@ -472,7 +511,16 @@ function DQA_avoid(want, pa) {   // steer round shells about to land (as tools/d
 }
 
 // ============ the entry: ?variant=road | hybrid (called by ui.js once the loop exists) ============
+function s1AutoPause() {   // a bot run must not pause itself in a hidden tab; anything else gets the page's own setting back
+  if (!S1_NAP) S1_NAP = { v: window.noAutoPause };   // the page's own setting, kept once
+  window.noAutoPause = S1 && S1_BOT ? true : S1_NAP.v;
+}
+function s1Paved(x, y) {   // inside a clearing (or The Bull's) you drive as on the road: same speed, so the same grip and drift
+  if (!s1On()) return false; const L = demo.layout;
+  return L.clearings.some(Q => Math.hypot(x - Q.x, y - Q.y) < Q.R + 40) || Math.hypot(x - L.arena.x, y - L.arena.y) < L.arena.R + 40;
+}
 function s1Boot() {
+  for (const f of ['demoOpen', 'demoExit']) s1Wrap(f, (keep, a) => { S1 = null; s1AutoPause(); return keep.apply(null, a); });   // leaving a variant run
   s1Wrap('gameOver', (keep, a) => { const r = keep.apply(null, a); if (s1On() && runState && runState.outcome === 'lost') s1End(false); return r; });   // (ui.js defines it, after this file)
   s1Wrap('advanceFrame', (keep, a) => {   // &speed=N: N update pairs a frame (one drawn); &bot=1: the autopilot steers before each pair
     if (!s1On()) return keep.apply(null, a);
@@ -486,6 +534,5 @@ function s1Boot() {
     const r = keep.apply(null, a); if (S1_BOT) keys.ArrowLeft = keys.ArrowRight = false; return r;
   });
   const v = S1Q.get('variant'); if (!S1_VARIANTS[v]) return;
-  if (S1_BOT) window.noAutoPause = true;
   demoOpen(); demoStart(S1_VARIANTS[v], S1Q.get('seed') !== null ? +S1Q.get('seed') : undefined);
 }

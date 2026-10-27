@@ -282,7 +282,7 @@ function drumBoom(b) {
   fires.push({ x: b.x, y: b.y, r: 60, t: 0, life: 2.2, byYou: b.byYou });
   for (const W of walls) if (circleRect({ x: b.x, y: b.y, r: 95 }, W)) hitWall(W, 1, b.byYou);
   fortDrum(b);   // beside the Road Fortress's guns, it knocks them out
-  if (Math.hypot(player.x - b.x, player.y - b.y) < 80) hurt(8, false, 'drum');
+  if (Math.hypot(player.x - b.x, player.y - b.y) < 80) hurt(8, false, 'drum', { x: b.x, y: b.y, name: 'drum' });
 }
 function hitWall(W, n, byYou) {   // scrap walls take 3 hits, then crumble into rubble; byYou: your ram or your drum did it
   if (!W || W.gone || W.rock) return; if (byYou) W.byYou = true;

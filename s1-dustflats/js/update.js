@@ -132,7 +132,7 @@ function update(dt) {
   if (state === 'play' && pv > 200) { const fx = player.vx / pv, fy = player.vy / pv; for (const k of boss && !boss.dead ? [...cars, boss] : cars) { const rx = k.x - player.x, ry = k.y - player.y, lon = rx * fx + ry * fy, lat = Math.abs(-rx * fy + ry * fx); if (lon > 40 && lon < 230 && lat < 30) { drafting = true; break; } } }
   if (drafting) { player.draftC = (player.draftC || 0) + dt; if (cchance() < 0.6) { const o = crand(-30, 30), fx = player.vx / pv, fy = player.vy / pv; parts.push({ k: 'wind', x: player.x + fx * 70 - fy * o, y: player.y + fy * 70 + fx * o, a: Math.atan2(fy, fx), len: crand(50, 90), t: 0, life: 0.25 }); } }
   else { if ((player.draftC || 0) > 0.7 && state === 'play') { player.boostT = 0.9; player.boostMul = 1.25; SFX.boost(2); } player.draftC = 0; }
-  const rx = roadX(player.y), onRoad = rx !== null && Math.abs(player.x - rx) < ROAD_W * 0.9;   // the old highway is faster than the sand
+  const rx = roadX(player.y), onRoad = (rx !== null && Math.abs(player.x - rx) < ROAD_W * 0.9) || (typeof s1Paved === 'function' && s1Paved(player.x, player.y));   // the old highway is faster than the sand (a Sprint 1 clearing drives like the road)
   player.onRoad = onRoad;
   if (state === 'play' && (!ptrail.length || time - ptrail[ptrail.length - 1].t > 0.08)) { ptrail.push({ x: player.x, y: player.y, t: time }); if (ptrail.length > 32) ptrail.shift(); }
   airTick(player, dt);
@@ -422,7 +422,7 @@ function update(dt) {
   harpoons = harpoons.filter(h => !h.dead);
   for (const b of bombs) {
     b.t += hdt;
-    if (b.t >= b.T) { b.dead = true; fires.push({ x: b.tx, y: b.ty, r: b.lance || b.shell ? 55 : 70, t: 0, life: b.shell ? 1 : b.lance ? 1.6 : 3 }); smallBoom(b.tx, b.ty, 90); if ((b.lance || b.shell) && Math.hypot(player.x - b.tx, player.y - b.ty) < 78) hurt(b.dmg || 10, false, b.src || (b.shell || b.lance ? 'boss' : 'impact')); }   // thunder-sticks and shells hit hard where they land
+    if (b.t >= b.T) { b.dead = true; fires.push({ x: b.tx, y: b.ty, r: b.lance || b.shell ? 55 : 70, t: 0, life: b.shell ? 1 : b.lance ? 1.6 : 3 }); smallBoom(b.tx, b.ty, 90); if ((b.lance || b.shell) && Math.hypot(player.x - b.tx, player.y - b.ty) < 78) hurt(b.dmg || 10, false, b.src || (b.shell || b.lance ? 'boss' : 'impact'), { x: b.sx, y: b.sy, name: 'shell' }); }   // thunder-sticks and shells hit hard where they land
   }
   bombs = bombs.filter(b => !b.dead);
   for (const f of fires) { f.t += dt; if (cchance() < (f.mine ? 0.12 : 0.5)) parts.push({ k: f.mine ? 'ember' : 'fire', x: f.x + crand(-f.r, f.r) * 0.7, y: f.y + crand(-f.r, f.r) * 0.7, vx: crand(-15, 15), vy: crand(-50, -15), t: 0, life: crand(0.3, 0.6), size: crand(8, 14) }); }
@@ -486,10 +486,10 @@ function update(dt) {
           if (fork) eqAct('forks');
           knock((pIn * 1.4 + 160) * (fork ? fork.shove : 1)); shoves++; SFX.shove(); if (pIn > 220 && k.crew) ejectCrew(k, 1);
           if (closing > 200 && !k.dead) { freeze = Math.max(freeze, 0.03); shake = Math.max(shake, 3 * (calmMotion ? 0.3 : 1)); }
-          if (attack && itsNose && kIn > 120) hurt(k.T.leak * 0.5 * (fork ? 1 - fork.guard : 1), false, k.stageBoss ? 'boss' : 'impact');   // nose to nose with one that was attacking: you both feel it
+          if (attack && itsNose && kIn > 120) hurt(k.T.leak * 0.5 * (fork ? 1 - fork.guard : 1), false, k.stageBoss ? 'boss' : 'impact', k);   // nose to nose with one that was attacking: you both feel it
         }
         else if (attack && kIn > 60) {   // it got you: the leak (a rear shield takes some of it)
-          const n = demo ? eqShieldTake(k.T.leak, k.x, k.y) : k.T.leak; if (n > 0) hurt(n, false, k.stageBoss ? 'boss' : 'impact');
+          const n = demo ? eqShieldTake(k.T.leak, k.x, k.y) : k.T.leak; if (n > 0) hurt(n, false, k.stageBoss ? 'boss' : 'impact', k);   // (the 4th argument, who hit you, is read by the Sprint 1 metrics only)
           const kb = 150 * Math.min(2, player.m / k.m); k.vx += h.nx * kb; k.vy += h.ny * kb; k.stun = 0.8;
           player.vx -= h.nx * kIn * 0.5 * k.m / player.m; player.vy -= h.ny * kIn * 0.5 * k.m / player.m;   // a heavy rammer shoves you
           spinHit(player, cx, cy, -h.nx * kIn * 0.5 * k.m, -h.ny * kIn * 0.5 * k.m, PIT_K * (k.mode === 'ram' ? 0.95 : 0.6));
