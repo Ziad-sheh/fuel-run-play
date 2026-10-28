@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Music Lab</title>
+<style>
+/* Wasteland Drift soundtrack test bench: live controls on top, offline measurements below. */
+:root{--sand:#e9b872;--ink:#24160f;--cream:#fff4dc;--rust:#b8401f;--red:#e8432f;--teal:#2f8f9d;--gold:#ffd23f;--mute:#7a6a5c}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--sand);color:var(--ink);font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:calc(env(safe-area-inset-top) + 14px) 16px calc(env(safe-area-inset-bottom) + 28px)}
+h1{font:900 26px/1.1 Impact,"Arial Black",system-ui,sans-serif;letter-spacing:1px;margin:0 0 4px;text-transform:uppercase}
+p.sub{margin:0 0 14px;font-size:14px}
+section{background:var(--cream);border:3px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:12px;margin:0 0 16px}
+h2{font:900 15px/1 system-ui,sans-serif;letter-spacing:1.5px;text-transform:uppercase;margin:0 0 10px}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px;margin:0 0 8px}
+button{font:800 15px/1 system-ui,sans-serif;color:var(--ink);background:#fff;border:3px solid var(--ink);padding:12px 6px;min-height:46px;cursor:pointer;box-shadow:2px 2px 0 var(--ink);touch-action:manipulation}
+button:active{transform:translate(2px,2px);box-shadow:none}
+#levels{grid-template-columns:repeat(4,1fr)}
+#levels button{padding:12px 2px;font-size:14px}
+button.go{background:var(--red);color:#fff}
+button.on{background:var(--gold)}
+button:disabled{opacity:.5}
+label{display:flex;align-items:center;gap:10px;font-weight:700}
+input[type=range]{flex:1;accent-color:var(--rust);height:30px}
+#readout{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-variant-numeric:tabular-nums}
+#readout div{background:#fff;border:2px solid var(--ink);padding:6px 8px}
+#readout b{display:block;font-size:22px;line-height:1.1}
+#readout span{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mute)}
+#beats{display:flex;gap:8px;margin-top:10px}
+#beats i{flex:1;height:14px;border:2px solid var(--ink);background:#fff}
+#beats i.lit{background:var(--rust)}
+#beats i.lit.one{background:var(--red)}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12px;font-variant-numeric:tabular-nums}
+th,td{border:1px solid #c9b48f;padding:4px 5px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{background:#f3e3c3}
+td.bad{background:#ffd0c4}
+#log{font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;margin:8px 0 0;max-height:180px;overflow:auto}
+.note{font-size:13px;margin:6px 0 0}
+</style>
+</head>
+<body>
+<main>
+  <h1>Wasteland Drift · Music</h1>
+  <p class="sub">The live soundtrack engine (<code>js/music.js</code>). Tap Start, then move the intensity. Changes land on the next bar.</p>
+
+  <section>
+    <h2>Transport</h2>
+    <div class="row"><button class="go" id="start">Start</button><button id="stop">Stop</button><button id="muteBtn">Mute</button></div>
+    <label>Volume <input type="range" id="vol" min="0" max="1" step="0.01" value="0.45"> <span id="volV">0.45</span></label>
+  </section>
+
+  <section>
+    <h2>Intensity</h2>
+    <div class="row" id="levels">
+      <button data-l="0">0 Menu</button><button data-l="1">1 Cruise</button><button data-l="2">2 Chase</button><button data-l="3">3 Bull</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Stingers</h2>
+    <div class="row" id="stingers">
+      <button data-s="boss">Boss</button><button data-s="victory">Victory</button><button data-s="depot">Depot</button><button data-s="wrecked">Wrecked</button><button data-s="levelup">Level up</button>
+    </div>
+    <p class="note">Boss, victory and depot land on the next beat. Wrecked and level up play at once. Wrecked also drops the music to the menu bed.</p>
+  </section>
+
+  <section>
+    <h2>Now playing</h2>
+    <div id="readout">
+      <div><span>Bar</span><b id="rBar">–</b></div>
+      <div><span>Beat</span><b id="rBeat">–</b></div>
+      <div><span>Intensity</span><b id="rInt">–</b></div>
+      <div><span>BPM</span><b id="rBpm">–</b></div>
+      <div><span>Voices</span><b id="rVoices">–</b></div>
+      <div><span>State</span><b id="rPlay">stopped</b></div>
+    </div>
+    <div id="beats"><i></i><i></i><i></i><i></i></div>
+  </section>
+
+  <section>
+    <h2>Offline check</h2>
+    <div class="row"><button id="runQA">Render &amp; measure</button><button id="runSave">Render + save WAVs</button></div>
+    <p class="note">Renders 16 bars of each intensity and each stinger in context with an OfflineAudioContext, then reports peak, RMS, render speed and the share of energy per band (phone speakers give almost nothing below 120 Hz). Saving needs the local capture server on port 8766.</p>
+    <div class="tablewrap"><table id="qa"><thead><tr><th>Render</th><th>Sec</th><th>Render %</th><th>Peak</th><th>RMS dB</th><th>&lt;120</th><th>120–250</th><th>250–600</th><th>600–2k</th><th>&gt;2k</th><th>Nodes pk</th></tr></thead><tbody></tbody></table></div>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script src="../js/music.js"></script>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+let ac = null, master = null, unlockEl = null, muted = false;
+
+// iPhones mute Web Audio when the ring switch is on silent; a looping silent <audio> started from a tap lifts that
+function silentWav() {
+  const n = 800, b = new Uint8Array(44 + n), v = new DataView(b.buffer), w = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true); w(36, 'data'); v.setUint32(40, n, true); b.fill(128, 44);
+  let s = ''; b.forEach(x => s += String.fromCharCode(x)); return 'data:audio/wav;base64,' + btoa(s);
+}
+function audio() {               // same master chain as the game: gain 0.9 -> compressor -> speakers
+  if (!ac) {
+    const A = window.AudioContext || window.webkitAudioContext; if (!A) return false;
+    ac = new A();
+    const comp = ac.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 6;
+    master = ac.createGain(); master.gain.value = 0.9; master.connect(comp); comp.connect(ac.destination);
+    Music.init(ac, master);
+    Music.setVolume(+$('vol').value);
+  }
+  if (ac.state === 'suspended') ac.resume();
+  if (!unlockEl) { try { unlockEl = new Audio(silentWav()); unlockEl.loop = true; unlockEl.setAttribute('playsinline', ''); unlockEl.play().catch(() => {}); } catch (e) {} }
+  return true;
+}
+
+$('start').onclick = () => { if (audio()) Music.start(); };
+$('stop').onclick = () => Music.stop(1.5);
+$('muteBtn').onclick = () => { audio(); muted = !muted; Music.setMuted(muted); $('muteBtn').textContent = muted ? 'Unmute' : 'Mute'; $('muteBtn').classList.toggle('on', muted); };
+$('vol').oninput = e => { $('volV').textContent = (+e.target.value).toFixed(2); Music.setVolume(+e.target.value); };
+document.querySelectorAll('#levels button').forEach(b => b.onclick = () => { audio(); Music.setIntensity(+b.dataset.l); });
+document.querySelectorAll('#stingers button').forEach(b => b.onclick = () => { if (audio()) Music.stinger(b.dataset.s); });
+
+function show() {
+  const s = Music.state();
+  $('rBar').textContent = s.playing ? s.bar : '–';
+  $('rBeat').textContent = s.playing ? s.beat : '–';
+  $('rInt').textContent = s.intensity + (s.target !== undefined && s.target !== s.intensity ? ' → ' + s.target : '');
+  $('rBpm').textContent = s.bpm;
+  $('rVoices').textContent = s.playing ? s.voices : '–';
+  $('rPlay').textContent = s.playing ? 'playing' : 'stopped';
+  document.querySelectorAll('#levels button').forEach(b => b.classList.toggle('on', +b.dataset.l === (s.target !== undefined ? s.target : s.intensity)));
+  document.querySelectorAll('#beats i').forEach((el, i) => { el.classList.toggle('lit', s.playing && i === s.beat - 1); el.classList.toggle('one', i === 0); });
+  requestAnimationFrame(show);
+}
+requestAnimationFrame(show);
+
+// ================= offline measurement =================
+const SR = 44100, SINK = 'http://127.0.0.1:8766/';
+function fft(re, im) {           // in-place radix-2
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) { let bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; } }
+  for (let len = 2; len <= n; len <<= 1) {
+    const a = -2 * Math.PI / len, wr = Math.cos(a), wi = Math.sin(a);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k], ui = im[i + k], vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci, vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k] = ur + vr; im[i + k] = ui + vi; re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+      }
+    }
+  }
+}
+function analyse(buf, from = 0, to = buf.duration) {
+  const L = buf.getChannelData(0), R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
+  const a = Math.floor(from * buf.sampleRate), b = Math.min(L.length, Math.floor(to * buf.sampleRate));
+  let peak = 0, sum = 0;
+  for (let i = a; i < b; i++) { const l = Math.abs(L[i]), r = Math.abs(R[i]); if (l > peak) peak = l; if (r > peak) peak = r; sum += (L[i] * L[i] + R[i] * R[i]) / 2; }
+  const rms = Math.sqrt(sum / Math.max(1, b - a));
+  // spectral balance: Hann-windowed 8192-point FFTs at 12 spots, power summed per band
+  const N = 8192, bands = [60, 250, 2000, 6000, Infinity], pow = [0, 0, 0, 0, 0], win = 12;
+  const fine = [60, 120, 250, 600, 2000, 6000, Infinity], fp = [0, 0, 0, 0, 0, 0, 0];
+  const re = new Float64Array(N), im = new Float64Array(N);
+  for (let w = 0; w < win; w++) {
+    const s0 = a + Math.floor((b - a - N) * (w + 0.5) / win);
+    for (let i = 0; i < N; i++) { const h = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)); re[i] = ((L[s0 + i] || 0) + (R[s0 + i] || 0)) * 0.5 * h; im[i] = 0; }
+    fft(re, im);
+    for (let k = 1; k < N / 2; k++) { const f = k * buf.sampleRate / N, p = re[k] * re[k] + im[k] * im[k]; let j = 0; while (f >= bands[j]) j++; pow[j] += p; j = 0; while (f >= fine[j]) j++; fp[j] += p; }
+  }
+  const tot = pow.reduce((x, y) => x + y, 0) || 1;
+  return { peak, rmsDb: 20 * Math.log10(rms || 1e-9), bands: pow.map(p => p / tot), fine: fp.map(p => p / tot) };
+}
+function wavDataUrl(buf, from = 0, to = buf.duration) {   // mono, 22.05 kHz, 16-bit preview
+  const L = buf.getChannelData(0), R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
+  const a = Math.floor(from * buf.sampleRate), b = Math.min(L.length, Math.floor(to * buf.sampleRate)), n = Math.floor((b - a) / 2);
+  const out = new Uint8Array(44 + n * 2), v = new DataView(out.buffer), w = (o, s) => { for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 22050, true); v.setUint32(28, 44100, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  // 63-tap windowed-sinc low-pass at 10 kHz before halving the rate, so the preview keeps the 2-6 kHz presence
+  const M = 31, K = new Float64Array(2 * M + 1), fc = 10000 / buf.sampleRate; let ks = 0;
+  for (let k = -M; k <= M; k++) { const x = 2 * Math.PI * (k + M) / (2 * M), bw = 0.42 - 0.5 * Math.cos(x) + 0.08 * Math.cos(2 * x); K[k + M] = (k ? Math.sin(2 * Math.PI * fc * k) / (Math.PI * k) : 2 * fc) * bw; ks += K[k + M]; }
+  for (let k = 0; k < K.length; k++) K[k] /= ks;
+  const m = i => ((L[i] || 0) + (R[i] || 0)) * 0.5;
+  for (let i = 0; i < n; i++) {
+    const c = a + i * 2; let s = 0; for (let k = 0; k < K.length; k++) s += K[k] * m(c + k - M);
+    v.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, Math.round(s * 32767))), true);
+  }
+  let bin = ''; for (let i = 0; i < out.length; i += 0x8000) bin += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+  return 'data:audio/wav;base64,' + btoa(bin);
+}
+// one render: start at an intensity, then run a script of [time (s), action] steps
+async function render(name, { level = 0, bars = 16, seed = 42, script = [], tail = 2, alone = false }) {
+  const bpm = [124, 124, 124, 132][level], len = alone ? bars : bars * 240 / bpm, dur = len + tail;
+  const off = new OfflineAudioContext(2, Math.ceil(SR * dur), SR);
+  const inst = Music._new(); inst.setSeed(seed); inst.init(off, off.destination); inst.setVolume(1); inst._trace(true);
+  const t0 = performance.now();
+  inst.setIntensity(level);
+  if (!alone) inst.start();
+  const steps = script.slice().sort((x, y) => x[0] - y[0]);
+  for (const [t, act] of steps) { inst._pump(t); act(inst); }
+  inst._pump(len);
+  const buf = await off.startRendering();
+  const ms = performance.now() - t0, st = inst._stats();
+  return { name, buf, dur, ms, ratio: ms / 1000 / dur, ...analyse(buf, 0, Math.min(dur, len + (alone ? tail : 0.5))), nodesPeak: st.peakLive, made: st.made, shed: st.shed };
+}
+const bar = (lvl, n) => n * 240 / [124, 124, 124, 132][lvl];
+const CASES = [
+  ['i0', { level: 0 }], ['i1', { level: 1 }], ['i2', { level: 2, seed: 5 }], ['i3', { level: 3, seed: 1 }],   // seeds whose 16 bars include a breakdown
+  ['stinger-boss', { level: 2, bars: 8, script: [[bar(2, 2) + 0.3, m => { m.stinger('boss'); m.setIntensity(3); }]] }],
+  ['stinger-victory', { level: 3, bars: 8, script: [[bar(3, 2) + 0.2, m => { m.stinger('victory'); m.setIntensity(1); }]] }],
+  ['stinger-depot', { level: 2, bars: 6, script: [[bar(2, 2) + 0.2, m => { m.stinger('depot'); m.setIntensity(1); }]] }],
+  ['stinger-wrecked', { level: 2, bars: 8, script: [[bar(2, 2) + 0.7, m => m.stinger('wrecked')]] }],
+  ['stinger-levelup', { level: 2, bars: 4, script: [[bar(2, 1) + 0.9, m => m.stinger('levelup')]] }],
+  ['journey', { level: 0, bars: 34, script: [            // menu -> cruise -> chase -> the Bull -> victory -> depot -> wrecked
+    [5, m => m.setIntensity(1)], [13, m => m.setIntensity(2)], [26, m => { m.stinger('boss'); m.setIntensity(3); }],
+    [42, m => { m.stinger('victory'); m.setIntensity(2); }], [50.5, m => m.stinger('levelup')], [53, m => { m.stinger('depot'); m.setIntensity(1); }],
+    [58.5, m => m.stinger('wrecked')]] }],
+  ['alone-boss', { level: 0, alone: true, bars: 0.1, tail: 6, script: [[0.05, m => m.stinger('boss')]] }],
+  ['alone-victory', { level: 0, alone: true, bars: 0.1, tail: 7, script: [[0.05, m => m.stinger('victory')]] }],
+  ['alone-depot', { level: 0, alone: true, bars: 0.1, tail: 4.5, script: [[0.05, m => m.stinger('depot')]] }],
+  ['alone-wrecked', { level: 0, alone: true, bars: 0.1, tail: 4, script: [[0.05, m => m.stinger('wrecked')]] }],
+  ['alone-levelup', { level: 0, alone: true, bars: 0.1, tail: 2, script: [[0.05, m => m.stinger('levelup')]] }],
+];
+const pct = x => (x * 100).toFixed(1);
+async function runAll(save = false, only) {
+  const tb = document.querySelector('#qa tbody'), log = $('log'), res = [];
+  tb.innerHTML = ''; log.textContent = '';
+  for (const [name, spec] of CASES) {
+    if (only && !only.includes(name)) continue;
+    const r = await render(name, spec);
+    const tr = document.createElement('tr');
+    const f = r.fine, cells = [name, r.dur.toFixed(1), pct(r.ratio), r.peak.toFixed(3), r.rmsDb.toFixed(1), pct(f[0] + f[1]), pct(f[2]), pct(f[3]), pct(f[4]), pct(f[5] + f[6]), r.nodesPeak];
+    tr.innerHTML = cells.map((c, i) => `<td class="${(i === 3 && r.peak > 0.9) || (i === 4 && r.rmsDb < -40) ? 'bad' : ''}">${c}</td>`).join('');
+    tb.appendChild(tr);
+    if (save && !name.startsWith('alone')) {
+      const file = 'music-' + name + '.wav';
+      try { await fetch(SINK + file, { method: 'POST', body: wavDataUrl(r.buf) }); log.textContent += 'saved ' + file + '\n'; }
+      catch (e) { log.textContent += 'could not save ' + file + ' (' + e.message + ')\n'; }
+    }
+    const { buf, ...rest } = r; res.push(rest);
+  }
+  return res;
+}
+window.MusicQA = { render, runAll, analyse, wavDataUrl, CASES };
+$('runQA').onclick = () => runAll(false);
+$('runSave').onclick = () => runAll(true);
+</script>
+</body>
+</html>
